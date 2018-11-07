@@ -78,28 +78,7 @@ Search::Search(const NodeTree& tree, Network* network,
       initial_visits_(root_node_->GetN()),
       best_move_callback_(best_move_callback),
       info_callback_(info_callback),
-      params_(options) {}
-
-namespace {
-void ApplyDirichletNoise(Node* node, float eps, double alpha) {
-  float total = 0;
-  std::vector<float> noise;
-
-  for (int i = 0; i < node->GetNumEdges(); ++i) {
-    float eta = Random::Get().GetGamma(alpha, 1.0);
-    noise.emplace_back(eta);
-    total += eta;
-  }
-
-  if (total < std::numeric_limits<float>::min()) return;
-
-  int noise_idx = 0;
-  for (const auto& child : node->Edges()) {
-    auto* edge = child.edge();
-    edge->SetP(edge->GetP() * (1 - eps) + eps * noise[noise_idx++] / total);
-  }
-}
-}  // namespace
+params_(options) { }
 
 void Search::SendUciInfo() REQUIRES(nodes_mutex_) {
   if (!current_best_edge_) return;
@@ -187,21 +166,12 @@ int64_t Search::GetTimeToDeadline() const {
 std::vector<std::string> Search::GetVerboseStats(Node* node,
                                                  bool is_black_to_move) const {
   const float parent_q =
-      -node->GetQ() -
-      params_.GetFpuReduction() * std::sqrt(node->GetVisitedPolicy());
+          -node->GetQ();
   const float U_coeff =
       params_.GetCpuct() * std::sqrt(std::max(node->GetChildrenVisits(), 1u));
 
   std::vector<EdgeAndNode> edges;
   for (const auto& edge : node->Edges()) edges.push_back(edge);
-
-  std::sort(edges.begin(), edges.end(),
-            [&parent_q, &U_coeff](EdgeAndNode a, EdgeAndNode b) {
-              return std::forward_as_tuple(a.GetN(),
-                                           a.GetQ(parent_q) + a.GetU(U_coeff)) <
-                     std::forward_as_tuple(b.GetN(),
-                                           b.GetQ(parent_q) + b.GetU(U_coeff));
-            });
 
   std::vector<std::string> infos;
   for (const auto& edge : edges) {
@@ -216,8 +186,7 @@ std::vector<std::string> Search::GetVerboseStats(Node* node,
     oss << " N: " << std::right << std::setw(7) << edge.GetN() << " (+"
         << std::setw(2) << edge.GetNInFlight() << ") ";
 
-    oss << "(P: " << std::setw(5) << std::setprecision(2) << edge.GetP() * 100
-        << "%) ";
+    oss << "(P: " << std::setw(5);
 
     oss << "(Q: " << std::setw(8) << std::setprecision(5) << edge.GetQ(parent_q)
         << ") ";
@@ -484,7 +453,7 @@ std::vector<EdgeAndNode> Search::GetBestChildrenNoTemperature(Node* parent,
             root_limit.end()) {
       continue;
     }
-    edges.emplace_back(edge.GetN(), edge.GetQ(0), edge.GetP(), edge);
+    edges.emplace_back(edge.GetN(), edge.GetQ(0), edge);
   }
   auto middle = (static_cast<int>(edges.size()) > count) ? edges.begin() + count
                                                          : edges.end();
@@ -830,11 +799,7 @@ SearchWorker::NodeToProcess SearchWorker::PickNodeToExtend(
     float best = std::numeric_limits<float>::lowest();
     float second_best = std::numeric_limits<float>::lowest();
     int possible_moves = 0;
-    float parent_q =
-        ((is_root_node && params_.GetNoise()) || !params_.GetFpuReduction())
-            ? -node->GetQ()
-            : -node->GetQ() - params_.GetFpuReduction() *
-                                  std::sqrt(node->GetVisitedPolicy());
+    float parent_q = -node->GetQ();
     for (auto child : node->Edges()) {
       if (is_root_node) {
         // If there's no chance to catch up to the current best node with
@@ -1030,7 +995,6 @@ int SearchWorker::PrefetchIntoCache(Node* node, int budget) {
   // FPU reduction is not taken into account.
   const float parent_q = -node->GetQ();
   for (auto edge : node->Edges()) {
-    if (edge.GetP() == 0.0f) continue;
     // Flip the sign of a score to be able to easily sort.
     scores.emplace_back(-edge.GetU(puct_mult) - edge.GetQ(parent_q), edge);
   }
@@ -1120,25 +1084,10 @@ void SearchWorker::FetchSingleNodeResult(NodeToProcess* node_to_process,
   // First the value...
   node_to_process->v = -computation_->GetQVal(idx_in_computation);
   // ...and secondly, the policy data.
-  float total = 0.0;
   for (auto edge : node->Edges()) {
-    float p =
-        computation_->GetPVal(idx_in_computation, edge.GetMove().as_nn_index());
-    if (params_.GetPolicySoftmaxTemp() != 1.0f) {
-      p = pow(p, 1 / params_.GetPolicySoftmaxTemp());
-    }
-    edge.edge()->SetP(p);
-    // Edge::SetP does some rounding, so only add to the total after rounding.
-    total += edge.edge()->GetP();
-  }
-  // Normalize P values to add up to 1.0.
-  if (total > 0.0f) {
-    float scale = 1.0f / total;
-    for (auto edge : node->Edges()) edge.edge()->SetP(edge.GetP() * scale);
-  }
-  // Add Dirichlet noise if enabled and at root.
-  if (params_.GetNoise() && node == search_->root_node_) {
-    ApplyDirichletNoise(node, 0.25, 0.3);
+    float prior =
+            computation_->GetPVal(idx_in_computation, edge.GetMove().as_nn_index());
+    edge.node()->FinalizeScoreUpdate(prior, 1);
   }
 }
 

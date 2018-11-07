@@ -81,11 +81,6 @@ class Edge {
   // is false) or as opponent (if as_opponent is true).
   Move GetMove(bool as_opponent = false) const;
 
-  // Returns or sets value of Move policy prior returned from the neural net
-  // (but can be changed by adding Dirichlet noise). Must be in [0,1].
-  float GetP() const;
-  void SetP(float val);
-
   // Debug information about the edge.
   std::string DebugString() const;
 
@@ -96,10 +91,6 @@ class Edge {
   // i.e. black's e7e5 is stored as e2e4.
   // Root node contains move a1a1.
   Move move_;
-
-  // Probability that this move will be made, from the policy head of the neural
-  // network; compressed to a 16 bit format (5 bits exp, 11 bits significand).
-  uint16_t p_ = 0;
 
   friend class EdgeList;
 };
@@ -238,8 +229,6 @@ class Node {
   // of the player who "just" moved to reach this position, rather than from the
   // perspective of the player-to-move for the position.
   float q_ = 0.0f;
-  // Sum of policy priors which have had at least one playout.
-  float visited_policy_ = 0.0f;
   // How many completed visits this node had.
   uint32_t n_ = 0;
   // (AKA virtual loss.) How many threads currently process this node (started
@@ -310,8 +299,6 @@ class EdgeAndNode {
   // Whether the node is known to be terminal.
   bool IsTerminal() const { return node_ ? node_->IsTerminal() : false; }
 
-  // Edge related getters.
-  float GetP() const { return edge_->GetP(); }
   Move GetMove(bool flip = false) const {
     return edge_ ? edge_->GetMove(flip) : Move();
   }
@@ -319,7 +306,7 @@ class EdgeAndNode {
   // Returns U = numerator * p / N.
   // Passed numerator is expected to be equal to (cpuct * sqrt(N[parent])).
   float GetU(float numerator) const {
-    return numerator * GetP() / (1 + GetNStarted());
+    return numerator / (1 + GetNStarted());
   }
 
   int GetVisitsToReachU(float target_score, float numerator,
@@ -329,7 +316,7 @@ class EdgeAndNode {
     const auto n1 = GetNStarted() + 1;
     return std::max(
         1.0f,
-        std::min(std::floor(GetP() * numerator / (target_score - q) - n1) + 1,
+        std::min(std::floor(numerator / (target_score - q) - n1) + 1,
                  1e9f));
   }
 
